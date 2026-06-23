@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# build output (regenerate with `npm run build` / `npm run package`)
+dist/
+*.zip
+
+# vite
+.vite/
+
+# logs
+*.log
+npm-debug.log*
+
+# os / editor cruft
+.DS_Store
+.DS_Store?
+*.swp
+.idea/
+
+.claude/

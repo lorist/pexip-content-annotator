@@ -1,0 +1,12 @@
+{
+  "_comment": "DEV workflow: set the plugin's `plugins[]` entry in the DEPLOYED branding's manifest.json to this, upload that branding ONCE, then run `npm run dev`. Changes hot-reload with no re-upload. Requirements: the vite dev server must be RUNNING (a localhost entry is invalid otherwise), use Chrome (it allows http://localhost from an https page), and join via 'Join with Browser'. Switch back to manifest.snippet.json (relative path) for the real deployable ZIP.",
+  "src": "http://localhost:5173",
+  "id": "content-annotator",
+  "sandboxValues": [
+    "allow-same-origin",
+    "allow-popups",
+    "allow-popups-to-escape-sandbox",
+    "allow-forms",
+    "allow-scripts"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "_comment": "Merge this object into the `plugins` array of an existing branding's manifest.json (root level, NOT under applicationConfig). The `src` folder name must match the plugin id used in registerPlugin ('content-annotator').",
+  "src": "./plugins/content-annotator/index.html",
+  "sandboxValues": [
+    "allow-same-origin",
+    "allow-popups",
+    "allow-popups-to-escape-sandbox",
+    "allow-forms",
+    "allow-scripts"
+  ]
+}

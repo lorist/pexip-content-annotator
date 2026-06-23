@@ -1,0 +1,19 @@
+{
+  "name": "pexip-content-annotator",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Pexip webapp3 plugin: snapshot the shared content stream, annotate it, and save.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && cp branding-index.html dist/index.html",
+    "package": "npm run build && bash scripts/package-branding.sh"
+  },
+  "dependencies": {
+    "@pexip/plugin-api": "^22.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.0.0"
+  }
+}

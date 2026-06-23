@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Annotator</title>
+    <style>
+      :root {
+        --bg: #0e1117;
+        --panel: #161b22;
+        --border: #2b333f;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --accent: #2f81f7;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      body { display: flex; flex-direction: column; }
+      #toolbar {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+        padding: 8px 10px; background: var(--panel);
+        border-bottom: 1px solid var(--border);
+      }
+      .group { display: flex; align-items: center; gap: 4px; padding: 0 6px; }
+      .group + .group { border-left: 1px solid var(--border); }
+      button.tool, button.action {
+        background: #1f262f; color: var(--fg); border: 1px solid var(--border);
+        border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer;
+      }
+      button.tool:hover, button.action:hover { background: #262e39; }
+      button.tool.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button.action.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      .swatch {
+        width: 22px; height: 22px; border-radius: 50%; border: 2px solid transparent;
+        cursor: pointer; padding: 0;
+      }
+      .swatch.active { border-color: #fff; box-shadow: 0 0 0 1px var(--border); }
+      input[type="color"] { width: 28px; height: 28px; border: none; background: none; cursor: pointer; padding: 0; }
+      select { background: #1f262f; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px; }
+      .label { color: var(--muted); font-size: 12px; }
+      #stage {
+        flex: 1; position: relative; overflow: auto; display: flex;
+        align-items: center; justify-content: center; padding: 16px;
+      }
+      #canvas {
+        max-width: 100%; max-height: 100%; background: #000;
+        box-shadow: 0 0 0 1px var(--border); cursor: crosshair; touch-action: none;
+      }
+      #overlay {
+        position: absolute; inset: 0; display: flex; align-items: center;
+        justify-content: center; flex-direction: column; gap: 12px;
+        background: rgba(14, 17, 23, 0.85); color: var(--muted); font-size: 15px;
+      }
+      #overlay.hidden { display: none; }
+      .spinner {
+        width: 34px; height: 34px; border: 3px solid var(--border);
+        border-top-color: var(--accent); border-radius: 50%;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      #status { margin-left: auto; color: var(--muted); font-size: 12px; padding-right: 4px; }
+
+      /* share-into-meeting instruction banner (the WHOLE window — controls
+         included — gets shared via the meeting's own Share content picker) */
+      #present-hint { display: none; }
+      body.present #present-hint {
+        display: flex; gap: 12px; align-items: center;
+        position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 20;
+        background: rgba(22, 27, 34, 0.97); color: var(--fg);
+        border: 1px solid var(--accent); border-radius: 8px;
+        padding: 10px 14px; font-size: 13px; max-width: 80vw;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+      }
+      #exit-present {
+        background: var(--accent); color: #fff; border: none; border-radius: 6px;
+        padding: 4px 10px; font-size: 12px; cursor: pointer; white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="toolbar">
+      <div class="group" id="tools">
+        <button class="tool active" data-tool="pen">✏️ Pen</button>
+        <button class="tool" data-tool="line">／ Line</button>
+        <button class="tool" data-tool="arrow">➤ Arrow</button>
+        <button class="tool" data-tool="rect">▭ Rect</button>
+        <button class="tool" data-tool="text">T Text</button>
+      </div>
+      <div class="group" id="colors"></div>
+      <div class="group">
+        <span class="label">Custom</span>
+        <input type="color" id="customColor" value="#ff3b30" />
+      </div>
+      <div class="group">
+        <span class="label">Width</span>
+        <select id="width">
+          <option value="2">Thin</option>
+          <option value="4" selected>Medium</option>
+          <option value="8">Thick</option>
+          <option value="14">XL</option>
+        </select>
+      </div>
+      <div class="group">
+        <button class="action" id="undo">↶ Undo</button>
+        <button class="action" id="clear">🗑 Clear</button>
+      </div>
+      <div class="group">
+        <button class="action" id="copy">⧉ Copy</button>
+        <button class="action primary" id="save">💾 Save PNG</button>
+        <button class="action" id="present">📺 Share into meeting</button>
+      </div>
+      <span id="status"></span>
+    </div>
+
+    <div id="stage">
+      <canvas id="canvas" width="1280" height="720"></canvas>
+      <div id="overlay"><div class="spinner"></div><div>Capturing content…</div></div>
+    </div>
+
+    <div id="present-hint">
+      <span>To share this into the meeting: click <b>Share content</b> in the meeting, choose
+      <b>Window</b>, and pick <b>“Annotator”</b>. The whole window (these tools included) is
+      shared live as you draw.</span>
+      <button id="exit-present">Got it</button>
+    </div>
+
+    <script>
+      (function () {
+        'use strict';
+
+        var canvas = document.getElementById('canvas');
+        var ctx = canvas.getContext('2d');
+        var overlay = document.getElementById('overlay');
+        var statusEl = document.getElementById('status');
+
+        var bg = null;          // background image (the snapshot)
+        var ops = [];           // committed vector annotations
+        var current = null;     // op being drawn
+        var alias = '';
+        var loaded = false;
+
+        var state = { tool: 'pen', color: '#ff3b30', width: 4 };
+
+        var PALETTE = ['#ff3b30', '#ffcc00', '#34c759', '#2f81f7', '#000000', '#ffffff'];
+
+        // ---- toolbar wiring --------------------------------------------------
+        var colorsEl = document.getElementById('colors');
+        PALETTE.forEach(function (c, i) {
+          var b = document.createElement('button');
+          b.className = 'swatch' + (i === 0 ? ' active' : '');
+          b.style.background = c;
+          b.dataset.color = c;
+          b.addEventListener('click', function () { setColor(c, b); });
+          colorsEl.appendChild(b);
+        });
+        document.getElementById('customColor').addEventListener('input', function (e) {
+          setColor(e.target.value, null);
+        });
+        function setColor(c, el) {
+          state.color = c;
+          document.querySelectorAll('.swatch').forEach(function (s) { s.classList.remove('active'); });
+          if (el) el.classList.add('active');
+        }
+
+        document.querySelectorAll('.tool').forEach(function (b) {
+          b.addEventListener('click', function () {
+            state.tool = b.dataset.tool;
+            document.querySelectorAll('.tool').forEach(function (x) { x.classList.remove('active'); });
+            b.classList.add('active');
+          });
+        });
+        document.getElementById('width').addEventListener('change', function (e) {
+          state.width = parseInt(e.target.value, 10);
+        });
+        document.getElementById('undo').addEventListener('click', function () { ops.pop(); redraw(); });
+        document.getElementById('clear').addEventListener('click', function () { ops = []; redraw(); });
+        document.getElementById('save').addEventListener('click', savePng);
+        document.getElementById('copy').addEventListener('click', copyPng);
+
+        // ---- share-into-meeting instructions ---------------------------------
+        // The plugin cannot trigger the meeting's screen-share (no API + the
+        // browser picker needs a gesture in the webapp), so this just shows how
+        // to share THIS window — which includes the toolbar/controls, live.
+        function enterPresent() { document.body.classList.add('present'); }
+        function exitPresent() { document.body.classList.remove('present'); }
+        document.getElementById('present').addEventListener('click', enterPresent);
+        document.getElementById('exit-present').addEventListener('click', exitPresent);
+
+        window.addEventListener('keydown', function (e) {
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { ops.pop(); redraw(); e.preventDefault(); }
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { savePng(); e.preventDefault(); }
+          if (e.key === 'Escape' && document.body.classList.contains('present')) exitPresent();
+        });
+
+        // ---- pointer -> canvas coordinate mapping ----------------------------
+        function pos(e) {
+          var r = canvas.getBoundingClientRect();
+          return {
+            x: (e.clientX - r.left) * (canvas.width / r.width),
+            y: (e.clientY - r.top) * (canvas.height / r.height),
+          };
+        }
+
+        canvas.addEventListener('pointerdown', function (e) {
+          if (!loaded) return;
+          var p = pos(e);
+          if (state.tool === 'text') {
+            var text = window.prompt('Annotation text:');
+            if (text) { ops.push({ tool: 'text', color: state.color, size: Math.max(14, state.width * 5), x: p.x, y: p.y, text: text }); redraw(); }
+            return;
+          }
+          canvas.setPointerCapture(e.pointerId);
+          current = { tool: state.tool, color: state.color, width: state.width, x: p.x, y: p.y, x2: p.x, y2: p.y, points: [p] };
+        });
+        canvas.addEventListener('pointermove', function (e) {
+          if (!current) return;
+          var p = pos(e);
+          current.x2 = p.x; current.y2 = p.y;
+          if (current.tool === 'pen') current.points.push(p);
+          redraw();
+          drawOp(current);
+        });
+        function endStroke() { if (current) { ops.push(current); current = null; redraw(); } }
+        canvas.addEventListener('pointerup', endStroke);
+        canvas.addEventListener('pointercancel', endStroke);
+
+        // ---- drawing ---------------------------------------------------------
+        function drawOp(op) {
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.strokeStyle = op.color;
+          ctx.fillStyle = op.color;
+          ctx.lineWidth = op.width || 4;
+
+          if (op.tool === 'pen') {
+            ctx.beginPath();
+            var pts = op.points;
+            if (!pts.length) return;
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+            ctx.stroke();
+          } else if (op.tool === 'line') {
+            ctx.beginPath(); ctx.moveTo(op.x, op.y); ctx.lineTo(op.x2, op.y2); ctx.stroke();
+          } else if (op.tool === 'rect') {
+            ctx.strokeRect(Math.min(op.x, op.x2), Math.min(op.y, op.y2), Math.abs(op.x2 - op.x), Math.abs(op.y2 - op.y));
+          } else if (op.tool === 'arrow') {
+            drawArrow(op.x, op.y, op.x2, op.y2, op.width || 4);
+          } else if (op.tool === 'text') {
+            ctx.font = (op.size || 24) + 'px system-ui, sans-serif';
+            ctx.textBaseline = 'top';
+            ctx.fillText(op.text, op.x, op.y);
+          }
+        }
+
+        function drawArrow(x1, y1, x2, y2, w) {
+          var head = Math.max(10, w * 3);
+          var ang = Math.atan2(y2 - y1, x2 - x1);
+          ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x2, y2);
+          ctx.lineTo(x2 - head * Math.cos(ang - Math.PI / 6), y2 - head * Math.sin(ang - Math.PI / 6));
+          ctx.lineTo(x2 - head * Math.cos(ang + Math.PI / 6), y2 - head * Math.sin(ang + Math.PI / 6));
+          ctx.closePath(); ctx.fill();
+        }
+
+        function redraw() {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          if (bg) ctx.drawImage(bg, 0, 0, canvas.width, canvas.height);
+          for (var i = 0; i < ops.length; i++) drawOp(ops[i]);
+        }
+
+        // ---- save / copy -----------------------------------------------------
+        function filename() {
+          var ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          var a = (alias || 'content').replace(/[^a-z0-9_-]+/gi, '_');
+          return 'pexip-annotation-' + a + '-' + ts + '.png';
+        }
+        function savePng() {
+          if (!loaded) return;
+          canvas.toBlob(function (blob) {
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url; a.download = filename();
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+            flash('Saved ' + a.download);
+          }, 'image/png');
+        }
+        async function copyPng() {
+          if (!loaded) return;
+          try {
+            if (!window.ClipboardItem || !navigator.clipboard) throw new Error('unsupported');
+            var blob = await new Promise(function (r) { canvas.toBlob(r, 'image/png'); });
+            await navigator.clipboard.write([new window.ClipboardItem({ 'image/png': blob })]);
+            flash('Copied to clipboard');
+          } catch (e) { flash('Copy not supported in this browser'); }
+        }
+        function flash(msg) { statusEl.textContent = msg; setTimeout(function () { if (statusEl.textContent === msg) statusEl.textContent = ''; }, 3000); }
+
+        // ---- image intake ----------------------------------------------------
+        function loadImage(dataUrl, a) {
+          alias = a || '';
+          var img = new Image();
+          img.onload = function () {
+            bg = img;
+            canvas.width = img.naturalWidth || 1280;
+            canvas.height = img.naturalHeight || 720;
+            loaded = true;
+            ops = [];
+            overlay.classList.add('hidden');
+            redraw();
+          };
+          img.onerror = function () { showOverlay('Failed to load the captured image.'); };
+          img.src = dataUrl;
+        }
+        function showOverlay(msg) {
+          overlay.classList.remove('hidden');
+          overlay.innerHTML = '';
+          var title = document.createElement('div');
+          title.textContent = 'Could not capture content';
+          title.style.cssText = 'color:#e6edf3;font-size:15px;margin-bottom:10px;';
+          var box = document.createElement('div');
+          box.textContent = msg;
+          box.style.cssText =
+            'max-width:90%;max-height:60%;overflow:auto;white-space:pre-wrap;' +
+            'word-break:break-word;font-family:ui-monospace,SFMono-Regular,monospace;' +
+            'font-size:13px;line-height:1.5;color:#c9d4e0;background:#161b22;' +
+            'border:1px solid #2b333f;border-radius:8px;padding:14px;user-select:text;';
+          overlay.appendChild(title);
+          overlay.appendChild(box);
+        }
+
+        // ---- capture rendezvous over a same-origin BroadcastChannel ----------
+        // The host opens this popup (via the button's opensPopup), so we cannot
+        // talk to the plugin iframe through window.opener. Instead we ask the
+        // plugin (which is listening on the channel) to capture and send back.
+        function loadPlaceholder() {
+          var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">' +
+            '<rect width="100%" height="100%" fill="#11151c"/>' +
+            '<rect x="40" y="40" width="1200" height="640" rx="16" fill="#1b2330" stroke="#2b3a52" stroke-width="2"/>' +
+            '<text x="640" y="360" fill="#8fa6c9" font-family="sans-serif" font-size="40" text-anchor="middle">Standalone preview (no plugin)</text>' +
+            '</svg>';
+          loadImage('data:image/svg+xml;base64,' + btoa(svg), 'dev');
+        }
+
+        var settled = false;
+        var reqId = 'r' + Date.now() + '-' + Math.floor((window.performance ? performance.now() : 0) * 1000);
+        var bc = ('BroadcastChannel' in window) ? new BroadcastChannel('content-annotator') : null;
+
+        function requestCapture() { if (bc) bc.postMessage({ type: 'request-capture', reqId: reqId }); }
+
+        if (bc) {
+          bc.onmessage = function (ev) {
+            var d = ev.data; if (!d) return;
+            if (d.reqId && d.reqId !== reqId) return; // not our request
+            if (d.type === 'image') { settled = true; loadImage(d.dataUrl, d.alias); }
+            else if (d.type === 'error') { settled = true; showOverlay(d.message || 'No content could be captured.'); }
+          };
+          requestCapture();
+          var tries = 0;
+          var iv = setInterval(function () {
+            if (settled || tries++ > 15) { clearInterval(iv); return; }
+            requestCapture();
+          }, 300);
+          setTimeout(function () {
+            if (settled) return;
+            if (location.hostname === 'localhost') loadPlaceholder();
+            else showOverlay('Couldn’t reach the plugin to capture content. Close this window and try again.');
+          }, 6000);
+        } else {
+          loadPlaceholder();
+        }
+      })();
+    </script>
+  </body>
+</html>
