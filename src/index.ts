@@ -1,6 +1,7 @@
 import { registerPlugin } from '@pexip/plugin-api';
 import { captureContentFrame } from './capture';
 import { createMockPlugin } from './mock';
+import { presentCanvas, canPresentProgrammatically, type PresentationHandle } from './present';
 
 const PLUGIN_ID = 'content-annotator';
 const CHANNEL = 'content-annotator';
@@ -47,26 +48,112 @@ async function init(): Promise<void> {
       ? new BroadcastChannel(CHANNEL)
       : null;
 
+  // Track an active presentation so we can stop it.
+  let activePresentation: PresentationHandle | null = null;
+
   channel?.addEventListener('message', async (ev: MessageEvent) => {
-    if (ev.data?.type !== 'request-capture') return;
-    const reqId = ev.data.reqId;
-    try {
-      const dataUrl = await captureContentFrame();
-      channel.postMessage({ type: 'image', reqId, dataUrl, alias });
-    } catch (err) {
-      console.error('[content-annotator] capture failed', err);
+    const { type, reqId } = ev.data ?? {};
+
+    if (type === 'request-capture') {
+      try {
+        const dataUrl = await captureContentFrame();
+        channel.postMessage({ type: 'image', reqId, dataUrl, alias });
+      } catch (err) {
+        console.error('[content-annotator] capture failed', err);
+        channel.postMessage({
+          type: 'error',
+          reqId,
+          message: (err as any)?.message || 'No content could be captured.',
+        });
+      }
+      return;
+    }
+
+    if (type === 'check-can-present') {
       channel.postMessage({
-        type: 'error',
+        type: 'can-present-result',
         reqId,
-        message: (err as any)?.message || 'No content could be captured.',
+        available: canPresentProgrammatically(),
       });
+      return;
+    }
+
+    if (type === 'start-presenting') {
+      // The editor sends us its canvas as an OffscreenCanvas or, more
+      // practically, it keeps drawing locally and we relay its
+      // captureStream. But the editor is in a popup (different window) so
+      // we can't access its canvas. Instead we create a local hidden
+      // canvas, load the editor's current image into it, and the editor
+      // sends us frame updates over the channel.
+      //
+      // Simpler approach: the editor captures its own canvas stream and
+      // we can't transfer MediaStreams over BroadcastChannel. So the
+      // actual present() call must happen HERE in the plugin iframe
+      // (same-origin with the webapp). We ask the editor to stream
+      // frames to us as ImageBitmaps via a dedicated MessageChannel.
+      //
+      // Pragmatic approach: we create a local canvas, the editor sends
+      // us data-URL frames at ~5fps, we paint them and present() that.
+      console.log('[content-annotator] start-presenting requested');
+      activePresentation?.stop();
+      const offscreen = document.createElement('canvas');
+      offscreen.width = ev.data.width || 1280;
+      offscreen.height = ev.data.height || 720;
+      const ctx = offscreen.getContext('2d')!;
+
+      const handle = await presentCanvas(offscreen);
+      if (!handle) {
+        channel.postMessage({
+          type: 'present-status',
+          reqId,
+          ok: false,
+          reason: 'Webapp present() not available — use manual Share Content instead.',
+        });
+        return;
+      }
+      activePresentation = handle;
+
+      // Listen for frame updates from the editor.
+      const onFrame = (fe: MessageEvent) => {
+        if (fe.data?.type !== 'present-frame') return;
+        const img = new Image();
+        img.onload = () => {
+          offscreen.width = img.naturalWidth || offscreen.width;
+          offscreen.height = img.naturalHeight || offscreen.height;
+          ctx.drawImage(img, 0, 0);
+        };
+        img.src = fe.data.dataUrl;
+      };
+      channel.addEventListener('message', onFrame);
+
+      // When presenting stops, clean up the frame listener.
+      const origStop = handle.stop;
+      handle.stop = () => {
+        channel.removeEventListener('message', onFrame);
+        origStop();
+        activePresentation = null;
+      };
+
+      channel.postMessage({ type: 'present-status', reqId, ok: true });
+      plugin.ui.showToast({ message: 'Sharing annotated content into meeting ✓' });
+      return;
+    }
+
+    if (type === 'stop-presenting') {
+      activePresentation?.stop();
+      activePresentation = null;
+      channel.postMessage({ type: 'present-status', reqId, ok: true, stopped: true });
+      return;
     }
   });
 
   // Host opens the popup within the real click gesture (avoids popup blockers).
   // Resolve the editor URL absolutely from THIS plugin's location, because the
   // host opens it relative to the top page, not the plugin folder.
-  const editorUrl = new URL('./editor.html', location.href).href;
+  // Cache-bust with a build-time version so browser cache doesn't serve stale editor.html.
+  declare const __BUILD_VERSION__: string;
+  const buildVer = typeof __BUILD_VERSION__ === 'string' ? __BUILD_VERSION__ : 'dev';
+  const editorUrl = new URL(`./editor.html?v=${buildVer}`, location.href).href;
 
   // Built-in IconEdit (verified valid on this deployment). If a future Pexip
   // version rejects it with "Invalid Icon name", swap to a custom data-URL SVG:

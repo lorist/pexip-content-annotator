@@ -6,6 +6,9 @@ import { defineConfig } from 'vite';
 // `assets/index.js` filename for simpler branding assembly.
 export default defineConfig(({ command }) => ({
   base: command === 'build' ? './' : '/',
+  define: {
+    __BUILD_VERSION__: JSON.stringify(Date.now().toString(36)),
+  },
   server: {
     port: 5173,
     strictPort: true,
