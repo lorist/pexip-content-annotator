@@ -78,6 +78,16 @@
         background: var(--accent); color: #fff; border: none; border-radius: 6px;
         padding: 4px 10px; font-size: 12px; cursor: pointer; white-space: nowrap;
       }
+
+      /* Live-presenting indicator */
+      button.action.presenting {
+        background: #da3633; border-color: #da3633; color: #fff;
+        animation: pulse-present 1.8s ease-in-out infinite;
+      }
+      @keyframes pulse-present {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(218, 54, 51, 0.5); }
+        50% { box-shadow: 0 0 0 6px rgba(218, 54, 51, 0); }
+      }
     </style>
   </head>
   <body>
@@ -180,19 +190,100 @@
         document.getElementById('save').addEventListener('click', savePng);
         document.getElementById('copy').addEventListener('click', copyPng);
 
-        // ---- share-into-meeting instructions ---------------------------------
-        // The plugin cannot trigger the meeting's screen-share (no API + the
-        // browser picker needs a gesture in the webapp), so this just shows how
-        // to share THIS window — which includes the toolbar/controls, live.
+        // ---- share-into-meeting (programmatic or manual) --------------------
+        var presenting = false;
+        var frameInterval = null;
+        var presentBtn = document.getElementById('present');
+
         function enterPresent() { document.body.classList.add('present'); }
         function exitPresent() { document.body.classList.remove('present'); }
-        document.getElementById('present').addEventListener('click', enterPresent);
         document.getElementById('exit-present').addEventListener('click', exitPresent);
+
+        function setPresentingUI(active) {
+          presenting = active;
+          if (active) {
+            presentBtn.textContent = '⏹ Stop sharing';
+            presentBtn.classList.add('presenting');
+          } else {
+            presentBtn.textContent = '📺 Share into meeting';
+            presentBtn.classList.remove('presenting');
+          }
+        }
+
+        function startFrameStream() {
+          // Send canvas frames to the plugin at ~5 fps for the live presentation.
+          if (frameInterval) clearInterval(frameInterval);
+          frameInterval = setInterval(function () {
+            if (!presenting || !loaded) return;
+            try {
+              var dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+              bc.postMessage({ type: 'present-frame', dataUrl: dataUrl });
+            } catch (e) { /* ignore tainted canvas in dev */ }
+          }, 200);
+        }
+
+        function stopFrameStream() {
+          if (frameInterval) { clearInterval(frameInterval); frameInterval = null; }
+        }
+
+        function tryProgrammaticPresent() {
+          if (!bc) { enterPresent(); return; }
+          var rid = 'p' + Date.now();
+          // One-shot listener for the response.
+          function onReply(ev) {
+            var d = ev.data;
+            if (!d || d.type !== 'present-status' || d.reqId !== rid) return;
+            bc.removeEventListener('message', onReply);
+            if (d.ok && !d.stopped) {
+              // Programmatic present succeeded — stream frames.
+              setPresentingUI(true);
+              startFrameStream();
+              // Also send the first frame immediately.
+              try {
+                bc.postMessage({ type: 'present-frame', dataUrl: canvas.toDataURL('image/jpeg', 0.8) });
+              } catch (e) { /* */ }
+            } else {
+              // Not available — fall back to manual instructions.
+              enterPresent();
+            }
+          }
+          bc.addEventListener('message', onReply);
+          bc.postMessage({
+            type: 'start-presenting',
+            reqId: rid,
+            width: canvas.width,
+            height: canvas.height,
+          });
+          // Timeout: if no reply in 2s, fall back to manual.
+          setTimeout(function () {
+            bc.removeEventListener('message', onReply);
+            if (!presenting) enterPresent();
+          }, 2000);
+        }
+
+        function stopProgrammaticPresent() {
+          stopFrameStream();
+          setPresentingUI(false);
+          if (bc) {
+            bc.postMessage({ type: 'stop-presenting', reqId: 's' + Date.now() });
+          }
+        }
+
+        presentBtn.addEventListener('click', function () {
+          if (presenting) {
+            stopProgrammaticPresent();
+          } else {
+            tryProgrammaticPresent();
+          }
+        });
 
         window.addEventListener('keydown', function (e) {
           if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { ops.pop(); redraw(); e.preventDefault(); }
           if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { savePng(); e.preventDefault(); }
-          if (e.key === 'Escape' && document.body.classList.contains('present')) exitPresent();
+          if (e.key === 'Escape') {
+            if (presenting) stopProgrammaticPresent();
+            if (document.body.classList.contains('present')) exitPresent();
+          }
         });
 
         // ---- pointer -> canvas coordinate mapping ----------------------------
