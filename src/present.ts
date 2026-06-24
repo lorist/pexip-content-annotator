@@ -176,6 +176,37 @@ function isCurrentlyPresenting(win: Window): boolean {
 }
 
 /**
+ * Best-effort: detect when our presentation ends in the webapp because another
+ * participant took over the floor (the "Stop sharing" button disappears). Calls
+ * onEnd once when that happens, then stops. Returns a cleanup function.
+ *
+ * Only fires AFTER presentation is first confirmed active, so the brief window
+ * before the floor is taken doesn't trigger a false positive. Never fires if
+ * there's no same-origin parent, or if the stop button never appears (e.g. a
+ * Strategy A direct-client present with no DOM affordance).
+ */
+export function watchForPresentationEnd(onEnd: () => void): () => void {
+  const win = getSameOriginParent();
+  if (!win) return () => {};
+  let confirmed = false;
+  let done = false;
+  const iv = setInterval(() => {
+    if (done) return;
+    if (isCurrentlyPresenting(win)) {
+      confirmed = true;
+      return;
+    }
+    if (confirmed) {
+      done = true;
+      clearInterval(iv);
+      console.log(P, 'presentation ended in webapp — floor taken over by another participant');
+      onEnd();
+    }
+  }, 1000);
+  return () => { done = true; clearInterval(iv); };
+}
+
+/**
  * Click the webapp's own "Stop sharing" button so it runs the normal
  * release_floor flow and the conference cleanly stops showing the
  * presentation. Just stopping our canvas track is NOT enough — the webapp
@@ -197,16 +228,20 @@ function clickStopPresentation(win: Window): boolean {
 
 /** Selectors for the "Start sharing" button (not the stop button). */
 const START_SHARE_SELECTORS: string[] = [
+  'button[data-testid="button-start-presentation"]',
   'button[data-testid="toolbar-button-present"]',
   'button[data-testid="toolbar-button-screenshare"]',
   'button[data-testid="toolbar-button-share"]',
   'button[data-testid="button-presentation"]',
-  'button[data-testid*="present" i]:not([data-testid*="stop" i])',
+  // Loose fallbacks — exclude the stop button AND the presentation-mode/expand
+  // toggle (e.g. button-presentation-mode-toggle), which are NOT share buttons
+  // and would otherwise be clicked instead, breaking the share flow.
+  'button[data-testid*="present" i]:not([data-testid*="stop" i]):not([data-testid*="mode" i]):not([data-testid*="toggle" i])',
   'button[data-testid*="screenshare" i]',
   'button[data-testid*="share-screen" i]',
   'button[aria-label*="Share content" i]',
   'button[aria-label*="Share screen" i]',
-  'button[aria-label*="Present" i]:not([aria-label*="Stop" i])',
+  'button[aria-label*="Present" i]:not([aria-label*="Stop" i]):not([aria-label*="Expand" i])',
 ];
 
 function findStartShareButton(doc: Document): HTMLElement | null {
@@ -215,6 +250,24 @@ function findStartShareButton(doc: Document): HTMLElement | null {
     if (el) return el;
   }
   return null;
+}
+
+/**
+ * Wait until the webapp is ready for a fresh share: the "Start sharing" button
+ * is present AND we are not currently the floor holder. Used after stopping
+ * another presenter (take_floor/release_floor) so we don't click Share while
+ * the webapp is still renegotiating — which silently no-ops the first attempt.
+ * Resolves true when ready, false on timeout. Best-effort.
+ */
+export async function waitForShareReady(maxMs = 3000): Promise<boolean> {
+  const win = getSameOriginParent();
+  if (!win) return false;
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (!isCurrentlyPresenting(win) && findStartShareButton(win.document)) return true;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return false;
 }
 
 /** Wait for the "Share" button to appear after stopping (max waitMs). */

@@ -25,6 +25,10 @@ export function createMockPlugin(): any {
       }),
       showToast: (o: any) => console.log('[mock toast]', o?.message),
       showForm: async () => undefined,
+      showPrompt: async (o: any) => {
+        console.log('[mock prompt]', o?.title);
+        return o?.prompt?.primaryAction; // auto-confirm in dev
+      },
     },
     conference: {
       sendRequest: async () => ({

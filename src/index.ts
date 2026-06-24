@@ -1,7 +1,13 @@
 import { registerPlugin } from '@pexip/plugin-api';
 import { captureContentFrame } from './capture';
 import { createMockPlugin } from './mock';
-import { presentCanvas, canPresentProgrammatically, type PresentationHandle } from './present';
+import {
+  presentCanvas,
+  canPresentProgrammatically,
+  watchForPresentationEnd,
+  waitForShareReady,
+  type PresentationHandle,
+} from './present';
 
 const PLUGIN_ID = 'content-annotator';
 const CHANNEL = 'content-annotator';
@@ -41,6 +47,54 @@ async function init(): Promise<void> {
     alias = info?.conferenceAlias || info?.conference_alias || alias;
   });
 
+  // Track our own participant (for take_floor) and who else is presenting, so
+  // we can steal the floor via the Client API when taking over.
+  let me: any = null;
+  let otherPresenters: { uuid: string; name: string }[] = [];
+  plugin.events.me?.add?.((ev: any) => {
+    me = ev?.participant || ev;
+  });
+  plugin.events.participants?.add?.((ev: any) => {
+    const list = ev?.participants || [];
+    otherPresenters = list
+      .filter((p: any) => p.isPresenting && p.uuid !== me?.uuid)
+      .map((p: any) => ({ uuid: p.uuid, name: p.displayName || 'Someone' }));
+  });
+
+  const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  // Stop whoever is currently presenting via the Client API: POST take_floor on
+  // our OWN uuid grabs the floor (booting the current presenter), then
+  // release_floor frees it again so nobody is presenting. This leaves the
+  // webapp in a clean "no presentation" state, so our own share afterwards is a
+  // plain first-share with no native take-over dialog. See
+  // pexip/webapp3-plugin-stop-presenter for the take_floor/release_floor pattern.
+  async function stopCurrentPresenter(): Promise<void> {
+    if (!me?.uuid) {
+      console.warn('[content-annotator] cannot stop presenter — own uuid unknown');
+      return;
+    }
+    const post = (action: string) =>
+      plugin.conference.sendRequest({
+        path: `participants/${me.uuid}/${action}`,
+        method: 'POST',
+        payload: {},
+      });
+    try {
+      await post('take_floor'); // grab the floor → boots the current presenter
+      await wait(1000);
+      await post('release_floor'); // free it → nobody is presenting now
+      // Wait until the webapp has settled and is ready for a fresh share,
+      // rather than guessing a fixed delay — sharing too soon after
+      // release_floor silently no-ops and leaves the editor not presenting.
+      const ready = await waitForShareReady(3000);
+      await wait(ready ? 400 : 1200);
+      console.log('[content-annotator] stopped current presenter; share ready =', ready);
+    } catch (err) {
+      console.warn('[content-annotator] stop-presenter failed', err);
+    }
+  }
+
   // The editor popup (opened by the host via opensPopup) can't call the plugin
   // RPC itself, so it asks us to capture over a same-origin BroadcastChannel.
   const channel =
@@ -48,8 +102,12 @@ async function init(): Promise<void> {
       ? new BroadcastChannel(CHANNEL)
       : null;
 
-  // Track an active presentation so we can stop it.
+  // Track an active presentation so we can stop it. `presentStarting` guards
+  // the async start window (prompt → steal floor → presentCanvas) BEFORE
+  // `activePresentation` is set, so a duplicate start-presenting message can't
+  // run the take-over (and its confirmation dialog) a second time.
   let activePresentation: PresentationHandle | null = null;
+  let presentStarting = false;
 
   channel?.addEventListener('message', async (ev: MessageEvent) => {
     const { type, reqId } = ev.data ?? {};
@@ -95,7 +153,40 @@ async function init(): Promise<void> {
       // Pragmatic approach: we create a local canvas, the editor sends
       // us data-URL frames at ~5fps, we paint them and present() that.
       console.log('[content-annotator] start-presenting requested');
-      activePresentation?.stop();
+      // Idempotent: if we're already presenting, do NOT tear down and rebuild.
+      // Doing so races release_floor against the still-visible "Stop sharing"
+      // button and lands in the wrong re-share path (clicking the
+      // presentation-mode toggle), which fails into the manual fallback. The
+      // existing frame stream keeps the content live, so just re-confirm.
+      if (activePresentation || presentStarting) {
+        console.log('[content-annotator] already presenting/starting — ignoring duplicate start');
+        channel.postMessage({ type: 'present-status', reqId, ok: true });
+        return;
+      }
+      presentStarting = true;
+
+      // If someone else is presenting, ask the EDITOR to confirm the take-over
+      // (the dialog is shown in the editor window, not the webapp). The editor
+      // re-sends start-presenting with confirmTakeover once the user agrees.
+      if (otherPresenters.length > 0 && !ev.data.confirmTakeover) {
+        console.log('[content-annotator] another participant is presenting — asking editor to confirm');
+        presentStarting = false;
+        channel.postMessage({
+          type: 'present-status',
+          reqId,
+          ok: false,
+          needsConfirm: true,
+          presenterName: otherPresenters[0].name,
+        });
+        return;
+      }
+
+      // Confirmed (or nobody else was presenting): stop the current presenter
+      // via the API so our content takes a clean, dialog-free first-share slot.
+      if (otherPresenters.length > 0) {
+        await stopCurrentPresenter();
+      }
+
       const offscreen = document.createElement('canvas');
       offscreen.width = ev.data.width || 1280;
       offscreen.height = ev.data.height || 720;
@@ -122,6 +213,7 @@ async function init(): Promise<void> {
 
       const handle = await presentCanvas(offscreen);
       if (!handle) {
+        presentStarting = false;
         channel.postMessage({
           type: 'present-status',
           reqId,
@@ -131,6 +223,7 @@ async function init(): Promise<void> {
         return;
       }
       activePresentation = handle;
+      presentStarting = false;
 
       // Listen for frame updates from the editor.
       let lastFrameAt = Date.now();
@@ -162,10 +255,20 @@ async function init(): Promise<void> {
         }
       }, 1000);
 
-      // When presenting stops, clean up the frame listener and watchdog.
+      // Detect another participant taking over the floor: the webapp's
+      // "Stop sharing" button disappears even though we never stopped. When
+      // that happens, tear down our side and tell the editor to flip its
+      // button back to "Share into meeting".
+      const stopMonitor = watchForPresentationEnd(() => {
+        channel.postMessage({ type: 'present-ended', reason: 'taken-over' });
+        activePresentation?.stop();
+      });
+
+      // When presenting stops, clean up the frame listener, watchdog, monitor.
       const origStop = handle.stop;
       handle.stop = () => {
         clearInterval(watchdog);
+        stopMonitor();
         channel.removeEventListener('message', onFrame);
         origStop();
         activePresentation = null;

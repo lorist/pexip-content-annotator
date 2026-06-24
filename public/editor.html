@@ -228,12 +228,25 @@
 
         function tryProgrammaticPresent() {
           if (!bc) { enterPresent(); return; }
-          var rid = 'p' + Date.now();
-          // One-shot listener for the response.
+          sendStartPresenting(false);
+        }
+
+        function sendStartPresenting(confirmTakeover) {
+          var rid = 'p' + Date.now() + (confirmTakeover ? '-c' : '');
+          var to;
           function onReply(ev) {
             var d = ev.data;
             if (!d || d.type !== 'present-status' || d.reqId !== rid) return;
             bc.removeEventListener('message', onReply);
+            clearTimeout(to);
+            if (d.needsConfirm) {
+              // Someone else is presenting — confirm IN THE EDITOR, then retry
+              // with confirmTakeover so the plugin stops them and shares ours.
+              showTakeoverConfirm(d.presenterName,
+                function () { sendStartPresenting(true); },
+                function () { setPresentingUI(false); flash('Take-over cancelled'); });
+              return;
+            }
             if (d.ok && !d.stopped) {
               // Programmatic present succeeded — stream frames.
               setPresentingUI(true);
@@ -242,6 +255,10 @@
               try {
                 bc.postMessage({ type: 'present-frame', dataUrl: canvas.toDataURL('image/jpeg', 0.8) });
               } catch (e) { /* */ }
+            } else if (d.cancelled) {
+              // Declined — just reset, no banner.
+              setPresentingUI(false);
+              flash(d.reason || 'Take-over cancelled');
             } else {
               // Not available — fall back to manual instructions.
               enterPresent();
@@ -255,18 +272,51 @@
           bc.postMessage({
             type: 'start-presenting',
             reqId: rid,
+            confirmTakeover: !!confirmTakeover,
             width: canvas.width,
             height: canvas.height,
             dataUrl: initialFrame,
           });
-          // Timeout: fall back to manual if no reply. Taking over an existing
-          // presentation runs a parent-window deep scan + floor renegotiation,
-          // which can take several seconds — so wait generously (12s) rather
-          // than giving up at 2s and never streaming frames.
-          setTimeout(function () {
+          // Timeout: fall back to manual if no reply. Stopping the current
+          // presenter + floor renegotiation can take several seconds — so wait
+          // generously (12s) rather than giving up early and never streaming.
+          to = setTimeout(function () {
             bc.removeEventListener('message', onReply);
             if (!presenting) enterPresent();
           }, 12000);
+        }
+
+        // In-editor confirmation dialog (matches the editor's dark theme) shown
+        // when taking over someone else's presentation.
+        function showTakeoverConfirm(name, onYes, onNo) {
+          var back = document.createElement('div');
+          back.style.cssText = 'position:fixed;inset:0;z-index:50;display:flex;align-items:center;' +
+            'justify-content:center;background:rgba(0,0,0,0.55);';
+          var box = document.createElement('div');
+          box.style.cssText = 'background:#161b22;border:1px solid #2b333f;border-radius:10px;' +
+            'padding:20px 22px;max-width:420px;box-shadow:0 10px 40px rgba(0,0,0,0.5);';
+          var h = document.createElement('div');
+          h.textContent = 'Stop the current presenter?';
+          h.style.cssText = 'font-size:16px;font-weight:600;margin-bottom:8px;color:#e6edf3;';
+          var p = document.createElement('div');
+          p.textContent = (name || 'Someone') + ' is currently presenting. Stop their share and ' +
+            'present your annotated content instead?';
+          p.style.cssText = 'font-size:13px;color:#8b949e;margin-bottom:18px;line-height:1.5;';
+          var row = document.createElement('div');
+          row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+          var cancel = document.createElement('button');
+          cancel.className = 'action';
+          cancel.textContent = 'Cancel';
+          var ok = document.createElement('button');
+          ok.className = 'action primary';
+          ok.textContent = 'Stop & share';
+          row.appendChild(cancel); row.appendChild(ok);
+          box.appendChild(h); box.appendChild(p); box.appendChild(row);
+          back.appendChild(box);
+          document.body.appendChild(back);
+          function close() { if (back.parentNode) back.parentNode.removeChild(back); }
+          cancel.addEventListener('click', function () { close(); if (onNo) onNo(); });
+          ok.addEventListener('click', function () { close(); if (onYes) onYes(); });
         }
 
         function stopProgrammaticPresent() {
@@ -459,6 +509,20 @@
         var settled = false;
         var reqId = 'r' + Date.now() + '-' + Math.floor((window.performance ? performance.now() : 0) * 1000);
         var bc = ('BroadcastChannel' in window) ? new BroadcastChannel('content-annotator') : null;
+
+        // The plugin tells us when our share ended on its own — e.g. another
+        // participant took over the floor. Flip the button back to "Share into
+        // meeting" so the UI matches reality.
+        if (bc) {
+          bc.addEventListener('message', function (ev) {
+            if (!ev.data || ev.data.type !== 'present-ended') return;
+            stopFrameStream();
+            setPresentingUI(false);
+            flash(ev.data.reason === 'taken-over'
+              ? 'Sharing stopped — someone else took over'
+              : 'Sharing stopped');
+          });
+        }
 
         function requestCapture() { if (bc) bc.postMessage({ type: 'request-capture', reqId: reqId }); }
 
