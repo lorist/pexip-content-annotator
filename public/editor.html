@@ -248,17 +248,25 @@
             }
           }
           bc.addEventListener('message', onReply);
+          // Send the current canvas as the initial frame so the plugin paints
+          // real content before it starts presenting — never a black canvas.
+          var initialFrame = '';
+          try { initialFrame = canvas.toDataURL('image/jpeg', 0.8); } catch (e) { /* tainted in dev */ }
           bc.postMessage({
             type: 'start-presenting',
             reqId: rid,
             width: canvas.width,
             height: canvas.height,
+            dataUrl: initialFrame,
           });
-          // Timeout: if no reply in 2s, fall back to manual.
+          // Timeout: fall back to manual if no reply. Taking over an existing
+          // presentation runs a parent-window deep scan + floor renegotiation,
+          // which can take several seconds — so wait generously (12s) rather
+          // than giving up at 2s and never streaming frames.
           setTimeout(function () {
             bc.removeEventListener('message', onReply);
             if (!presenting) enterPresent();
-          }, 2000);
+          }, 12000);
         }
 
         function stopProgrammaticPresent() {
@@ -274,6 +282,17 @@
             stopProgrammaticPresent();
           } else {
             tryProgrammaticPresent();
+          }
+        });
+
+        // Closing the editor window must stop sharing into the meeting. The
+        // plugin can't observe this popup closing directly, so tell it to stop
+        // on the way out. (pagehide is the reliable "window is going away"
+        // signal — unload is deprecated and unreliable.) The plugin also has a
+        // frame-watchdog as a backstop if this message doesn't get through.
+        window.addEventListener('pagehide', function () {
+          if (presenting && bc) {
+            bc.postMessage({ type: 'stop-presenting', reqId: 's' + Date.now() });
           }
         });
 

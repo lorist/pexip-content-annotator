@@ -175,6 +175,26 @@ function isCurrentlyPresenting(win: Window): boolean {
   );
 }
 
+/**
+ * Click the webapp's own "Stop sharing" button so it runs the normal
+ * release_floor flow and the conference cleanly stops showing the
+ * presentation. Just stopping our canvas track is NOT enough — the webapp
+ * keeps the floor and presents the now-dead (black) track. Returns true if a
+ * stop button was found and clicked.
+ */
+function clickStopPresentation(win: Window): boolean {
+  const stopBtn = win.document.querySelector(
+    'button[data-testid="button-stop-presentation"], button[aria-label*="Stop sharing" i]',
+  ) as HTMLElement | null;
+  if (stopBtn) {
+    console.log(P, 'clicking webapp "Stop sharing" to release the floor');
+    stopBtn.click();
+    return true;
+  }
+  console.warn(P, 'stop: no "Stop sharing" button found — presentation may not release cleanly');
+  return false;
+}
+
 /** Selectors for the "Start sharing" button (not the stop button). */
 const START_SHARE_SELECTORS: string[] = [
   'button[data-testid="toolbar-button-present"]',
@@ -368,10 +388,11 @@ async function presentViaStopAndRestart(
 
   return {
     stop() {
-      // Stop canvas track — webapp will detect "ended" and call release_floor
+      // Release the floor via the webapp's own button, then stop our tracks.
+      clickStopPresentation(win);
       canvasTrack.stop();
       stream.getTracks().forEach((t) => t.stop());
-      console.log(P, 'Strategy B: stopped canvas track');
+      console.log(P, 'Strategy B: stopped presentation and canvas track');
     },
   };
 }
@@ -420,7 +441,11 @@ async function presentViaShareOverride(
 
   console.log(P, `Strategy C: SUCCESS — presenting canvas stream at ${fps} fps`);
   return {
-    stop() { stream.getTracks().forEach((t) => t.stop()); },
+    stop() {
+      // Release the floor via the webapp's own button, then stop our tracks.
+      clickStopPresentation(win);
+      stream.getTracks().forEach((t) => t.stop());
+    },
   };
 }
 

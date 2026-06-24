@@ -101,6 +101,25 @@ async function init(): Promise<void> {
       offscreen.height = ev.data.height || 720;
       const ctx = offscreen.getContext('2d')!;
 
+      // Paint the editor's current frame BEFORE presenting, so the first frame
+      // the conference sees is the real annotated content — never a black
+      // canvas. Taking over an existing presentation renegotiates immediately
+      // (take_floor), so a blank canvas at that instant is exactly what
+      // produced the black screen.
+      if (ev.data.dataUrl) {
+        await new Promise<void>((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            offscreen.width = img.naturalWidth || offscreen.width;
+            offscreen.height = img.naturalHeight || offscreen.height;
+            ctx.drawImage(img, 0, 0);
+            resolve();
+          };
+          img.onerror = () => resolve();
+          img.src = ev.data.dataUrl;
+        });
+      }
+
       const handle = await presentCanvas(offscreen);
       if (!handle) {
         channel.postMessage({
@@ -114,8 +133,12 @@ async function init(): Promise<void> {
       activePresentation = handle;
 
       // Listen for frame updates from the editor.
+      let lastFrameAt = Date.now();
+      let gotFirstFrame = false;
       const onFrame = (fe: MessageEvent) => {
         if (fe.data?.type !== 'present-frame') return;
+        lastFrameAt = Date.now();
+        gotFirstFrame = true;
         const img = new Image();
         img.onload = () => {
           offscreen.width = img.naturalWidth || offscreen.width;
@@ -126,9 +149,23 @@ async function init(): Promise<void> {
       };
       channel.addEventListener('message', onFrame);
 
-      // When presenting stops, clean up the frame listener.
+      // Watchdog: once the editor's live frame stream has started (~5fps), a
+      // gap means the editor window was closed/crashed without a clean
+      // stop-presenting message — end the presentation so we don't keep
+      // sharing a frozen frame. We only arm this AFTER the first frame so a
+      // slow editor start (or one that never streams) can't kill a working
+      // presentation of the initial painted frame.
+      const watchdog = window.setInterval(() => {
+        if (gotFirstFrame && Date.now() - lastFrameAt > 3000) {
+          console.log('[content-annotator] editor frames stopped — ending presentation');
+          activePresentation?.stop();
+        }
+      }, 1000);
+
+      // When presenting stops, clean up the frame listener and watchdog.
       const origStop = handle.stop;
       handle.stop = () => {
+        clearInterval(watchdog);
         channel.removeEventListener('message', onFrame);
         origStop();
         activePresentation = null;
